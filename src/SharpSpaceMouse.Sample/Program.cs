@@ -1,8 +1,5 @@
 ﻿using System;
 using System.Linq;
-using Device.Net;
-using Hid.Net.Windows;
-using Usb.Net.Windows;
 
 namespace SharpSpaceMouse.Sample {
     class Program {
@@ -15,15 +12,37 @@ namespace SharpSpaceMouse.Sample {
             SpaceMouse mouse;
             if (mouseInfo != null)
             {
-                mouse = new SpaceMouse(mouseInfo);
-                mouse.TranslationEvent += Mouse_TranslationEvent;
-                mouse.RotationEvent += Mouse_RotationEvent;
-                mouse.ButtonEvent += Mouse_ButtonEvent;
+                using (mouse = new SpaceMouse(mouseInfo))
+                {
+                    mouse.TranslationEvent += Mouse_TranslationEvent;
+                    mouse.RotationEvent += Mouse_RotationEvent;
+                    mouse.ButtonEvent += Mouse_ButtonEvent;
+                    mouse.ReaderLoopExceptionEvent += Mouse_ReaderLoopExceptionEvent;
 
-                mouse.Start();
+                    mouse.Start();
+
+                    Console.WriteLine("Started with device " + mouseInfo.ProductName);
+
+                    Console.ReadLine();
+
+                    Console.WriteLine("Abort");
+                    mouse.Abort();
+
+                    while (mouse.IsActive())
+                    {
+                        System.Threading.Thread.Sleep(100);
+                    }
+
+                    Console.WriteLine("Ended");
+                }
             }
 
             Console.ReadLine();
+        }
+
+        private static void Mouse_ReaderLoopExceptionEvent(object sender, SpaceMouse.SpaceMouseExceptionEventArgs e)
+        {
+            Console.WriteLine("Exception: " + e.Exception.ToString());
         }
 
         private static void Mouse_ButtonEvent(SpaceMouse arg1, bool[] arg2) {

@@ -3,12 +3,39 @@ using System.Linq;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Device.Net;
 using Hid.Net.Windows;
 
 namespace SharpSpaceMouse {
     public class SpaceMouse : IDisposable {
+
+        public class ConnectedSpaceMouseDefinition
+        {
+            public ConnectedDeviceDefinition ConnectedDeviceDefinition { get; }
+
+            public string DeviceId => ConnectedDeviceDefinition.DeviceId;
+            public string ProductName => ConnectedDeviceDefinition.ProductName;
+            public string Manufacturer => ConnectedDeviceDefinition.Manufacturer;
+            public string SerialNumber => ConnectedDeviceDefinition.SerialNumber;
+            public ushort? Usage => ConnectedDeviceDefinition.Usage;
+            public ushort? VersionNumber => ConnectedDeviceDefinition.VersionNumber;
+            public int? WriteBufferSize => ConnectedDeviceDefinition.WriteBufferSize;
+            public int? ReadBufferSize => ConnectedDeviceDefinition.ReadBufferSize;
+
+            internal ConnectedSpaceMouseDefinition(ConnectedDeviceDefinition connectedDeviceDefinition) 
+                => ConnectedDeviceDefinition = connectedDeviceDefinition ?? throw new ArgumentNullException(nameof(connectedDeviceDefinition));
+        }
+
+        public class SpaceMouseExceptionEventArgs : EventArgs
+        {
+            public bool StopReaderTask { get; set; } = false;
+            public Exception Exception { get; }
+
+            internal SpaceMouseExceptionEventArgs(Exception exception) 
+                => Exception = exception ?? throw new ArgumentNullException(nameof(exception));
+        }
 
         private enum EventType {
             Translation = 1,
@@ -29,8 +56,10 @@ namespace SharpSpaceMouse {
             WindowsHidDeviceFactory.Register(Logger, Tracer);
         }
 
-        public static async Task<IEnumerable<ConnectedDeviceDefinition>> GetConnectedMice() 
-            => (await DeviceManager.Current.GetConnectedDeviceDefinitionsAsync(null)).Where(d => Is3DxDevice(d));
+        public static async Task<IEnumerable<ConnectedSpaceMouseDefinition>> GetConnectedMice() 
+            => (await DeviceManager.Current.GetConnectedDeviceDefinitionsAsync(null))
+                .Where(d => Is3DxDevice(d))
+                .Select(d => new ConnectedSpaceMouseDefinition(d));
 
         private static bool Is3DxDevice(ConnectedDeviceDefinition hidInfo) {
             return hidInfo.VendorId == LOGITECH_3DX_VID &&
@@ -39,8 +68,8 @@ namespace SharpSpaceMouse {
         }
 #endregion
 
-        private bool _running = false;
-
+        private bool _runnung = false;
+        
         public Vector3 TranslationScale { get; set; } = new Vector3(1.0f / 350.0f);
         public Vector3 RotationScale { get; set; } = new Vector3(1.0f / 350.0f);
 
@@ -50,49 +79,70 @@ namespace SharpSpaceMouse {
 
         public event Action<SpaceMouse, Vector3> TranslationEvent;
         public event Action<SpaceMouse, Vector3> RotationEvent;
-        public event Action<SpaceMouse, bool[]> ButtonEvent; 
+        public event Action<SpaceMouse, bool[]> ButtonEvent;
 
-        private ConnectedDeviceDefinition _mouseInfo;
+        public event EventHandler<SpaceMouseExceptionEventArgs> ReaderLoopExceptionEvent;
+
+        private Thread _readerLoopThread;
+
+        private ConnectedSpaceMouseDefinition _mouseInfo;
         private IDevice _mouseDevice;
 
-        public SpaceMouse(ConnectedDeviceDefinition hidInfo)
+        public SpaceMouse(ConnectedSpaceMouseDefinition hidInfo)
         {
             _mouseInfo = hidInfo;
         }
 
         public void Start()
         {
-            if(_running)
+            if(IsActive())
                 throw new Exception("Device already started");
 
-            _mouseDevice = DeviceManager.Current.GetDevice(_mouseInfo);
+            _mouseDevice = DeviceManager.Current.GetDevice(_mouseInfo.ConnectedDeviceDefinition);
 
             _mouseDevice.InitializeAsync().Wait();
 
-            _running = true;
+            _runnung = true;
+            _readerLoopThread = new Thread(() => _loop())
+            {
+                IsBackground = true
+            };
+            _readerLoopThread.Start();
+        }
 
-            Task.Run(() => _loop());
+        public bool IsActive() => _readerLoopThread?.IsAlive ?? false;
+
+        public void Abort()
+        {
+            _runnung = false;
+            _readerLoopThread?.Interrupt();
+            //_readerLoopThread = null;
         }
 
         private async Task _loop()
         {
-            while (_running)
+            while (_runnung)
             {
                 try
                 {
                     var result = await _mouseDevice.ReadAsync();
 
+                    if(!_runnung)
+                        return;
+
                     if (result.BytesRead >= 7)
                     {
-                        if (result.Data[0] == (int)EventType.Translation)
+                        if (result.Data[0] == (int) EventType.Translation)
                         {
                             CurrentTranslation = toVector3(result.Data) * TranslationScale;
                             TranslationEvent?.Invoke(this, CurrentTranslation);
-                        } else if (result.Data[0] == (int) EventType.Rotation)
+                        }
+                        else if (result.Data[0] == (int) EventType.Rotation)
                         {
                             CurrentRotation = toVector3(result.Data) * RotationScale;
                             RotationEvent?.Invoke(this, CurrentRotation);
-                        } else if (result.Data[0] == (int)EventType.Buttons)
+                        }
+                        else if (result.Data[0] == (int) EventType.Buttons)
                         {
                             CurrentButtons = ConvertByteArrayToBoolArray(result.Data.Skip(1).ToArray());
                             ButtonEvent?.Invoke(this, CurrentButtons);
@@ -100,7 +150,15 @@ namespace SharpSpaceMouse {
 
                     }
 
-                } catch(Exception ex) { }
+                }
+                catch (Exception ex)
+                {
+                    var eventArgs = new SpaceMouseExceptionEventArgs(ex);
+                    ReaderLoopExceptionEvent?.Invoke(this, eventArgs);
+
+                    if (eventArgs.StopReaderTask)
+                        return;
+                }
             }
         }
 
@@ -120,7 +178,9 @@ namespace SharpSpaceMouse {
 
         public void Dispose()
         {
-            _running = false;
+            if (IsActive())
+                Abort();
+
             _mouseDevice?.Dispose();
         }
 
